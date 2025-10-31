@@ -214,10 +214,10 @@ async def get_snort_alerts(limit: int = 5, offset: int = 0):
             DATE_FORMAT(alert_time, '%Y-%m-%d %H:%i:%s') as alert_time
         FROM snort_alerts
         ORDER BY alert_time DESC
-        LIMIT %s OFFSET %s
+        LIMIT {limit} OFFSET {offset}
         """
         
-        cursor.execute(select_query, (limit, offset))
+        cursor.execute(select_query)
         alerts = cursor.fetchall()
         
         # Get total count
