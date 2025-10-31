@@ -20,7 +20,7 @@ app.add_middleware(
 
 # Database Configuration
 DB_CONFIG = {
-    "host": "127.0.0.1",
+    "host": "45.127.5.229",
     "user": "Libr_lmangskie",
     "password": "StrongPassword123!",
     "database": "Libr_auth_system"
