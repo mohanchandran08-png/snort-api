@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 import logging
+import re
 
 # Load environment variables
 load_dotenv()
@@ -337,6 +338,61 @@ async def delete_snort_alert(alert_id: int):
         if connection.is_connected():
             cursor.close()
             connection.close()
+
+@app.post("/api/detect-sql-injection")
+async def detect_sql_injection(data: dict):
+    """
+    Detect SQL injection in input data
+    Example: {"input": "'; DROP TABLE users--", "source_ip": "192.168.1.1"}
+    """
+    test_input = data.get('input', '')
+    source_ip = data.get('source_ip', '0.0.0.0')
+    
+    sql_patterns = [
+        r"(\bUNION\b.*\bSELECT\b|\bSELECT\b.*\bFROM\b)",
+        r"(\bINSERT\b.*\bINTO\b|\bDROP\b.*\bTABLE\b)",
+        r"(--|\/\*|\*\/)",
+        r"(\'\s*\)|\'\s*OR|\'\s*AND)",
+        r"\bUNION\s+SELECT\b",
+        r"(\bOR\b\s*1\s*=\s*1|\bAND\b\s*1\s*=\s*1)",
+    ]
+    
+    for pattern in sql_patterns:
+        if re.search(pattern, test_input, re.IGNORECASE):
+            # Store as real detection alert
+            try:
+                connection = get_db_connection()
+                cursor = connection.cursor()
+                insert_query = """
+                INSERT INTO snort_alerts 
+                (attack_type, source_ip, destination_ip, rule_priority, summary)
+                VALUES (%s, %s, %s, %s, %s)
+                """
+                cursor.execute(insert_query, (
+                    "SQL INJECTION",
+                    source_ip,
+                    "45.127.5.229",
+                    "High",
+                    f"Detected SQL injection: {test_input[:100]}"
+                ))
+                connection.commit()
+                cursor.close()
+                connection.close()
+            except Exception as e:
+                logger.error(f"Error storing detection alert: {e}")
+            
+            return {
+                "success": True,
+                "detected": True,
+                "attack_type": "SQL INJECTION",
+                "severity": "HIGH"
+            }
+    
+    return {
+        "success": True,
+        "detected": False,
+        "message": "No SQL injection detected"
+    }
 
 # Startup event
 @app.on_event("startup")
