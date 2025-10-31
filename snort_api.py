@@ -1,29 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
-import mysql.connector
-from mysql.connector import Error
 from datetime import datetime
-import os
-from dotenv import load_dotenv
-import logging
+import mysql.connector
+import json
+import re
+from typing import Optional
 
-# Load environment variables
-load_dotenv()
+app = FastAPI()
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="Snort Alert Integration API",
-    description="Real-time network intrusion alert system for LibraTrack",
-    version="1.0.0"
-)
-
-# CORS configuration
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,324 +18,236 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database connection configuration
+# Database Configuration
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'database': os.getenv('DB_NAME', 'Libr_auth_system'),
-    'user': os.getenv('DB_USER', 'root'),
-    'password': os.getenv('DB_PASSWORD', ''),
-    'port': int(os.getenv('DB_PORT', 3306))
+    "host": "45.127.5.229",
+    "user": "librarytrack_user",
+    "password": "StrongPassword123!",  # REPLACE WITH YOUR ACTUAL PASSWORD
+    "database": "librarytrack_db"
 }
 
-# Pydantic Models
+# Data Models
 class SnortAlert(BaseModel):
     attack_type: str
     source_ip: str
-    destination_ip: Optional[str] = None
-    rule_priority: str
+    destination_ip: str
+    rule_priority: int
     summary: str
-    alert_time: Optional[str] = None
+    detection_mode: str = "simulated"
 
-class SnortAlertResponse(BaseModel):
-    id: int
-    attack_type: str
-    source_ip: str
-    destination_ip: Optional[str]
-    rule_priority: str
-    summary: str
-    alert_time: str
-
-# Database Functions
+# Database Connection
 def get_db_connection():
-    """Create and return a MySQL database connection"""
     try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        return connection
-    except Error as e:
-        logger.error(f"Database connection error: {e}")
-        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+        conn = mysql.connector.connect(**DB_CONFIG)
+        return conn
+    except mysql.connector.Error as err:
+        print(f"Database connection error: {err}")
+        return None
 
-def create_snort_alerts_table():
-    """Create snort_alerts table if it doesn't exist"""
+# SQL Injection Detection Function
+def detect_sql_injection(data: str) -> tuple[bool, Optional[str]]:
+    """
+    Detect SQL injection patterns in input data
+    Returns: (is_injection, matched_pattern)
+    """
+    sql_patterns = [
+        (r"(\bUNION\b.*\bSELECT\b|\bSELECT\b.*\bFROM\b)", "UNION/SELECT detected"),
+        (r"(\bINSERT\b.*\bINTO\b|\bDROP\b.*\bTABLE\b)", "INSERT/DROP detected"),
+        (r"(--|\/\*|\*\/)", "SQL comment detected"),
+        (r"(\'\s*\)|\'\s*OR|\'\s*AND)", "SQL escape sequence detected"),
+        (r"\bUNION\s+SELECT\b", "UNION SELECT detected"),
+        (r"(\bOR\b\s*1\s*=\s*1|\bAND\b\s*1\s*=\s*1)", "Boolean-based SQLi detected"),
+        (r"(SLEEP\s*\(|BENCHMARK\s*\()", "Time-based SQLi detected"),
+        (r";\s*(SELECT|INSERT|UPDATE|DELETE|DROP)", "Stacked query detected"),
+        (r"xp_|sp_", "Stored procedure detected"),
+        (r"CAST\s*\(|CONVERT\s*\(", "Type conversion detected"),
+    ]
+    
+    for pattern, description in sql_patterns:
+        if re.search(pattern, data, re.IGNORECASE):
+            return True, description
+    
+    return False, None
+
+# Store Alert in Database
+def store_alert(alert_data: dict) -> bool:
+    """Store alert in database"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    cursor = conn.cursor()
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-        
-        create_table_query = """
-        CREATE TABLE IF NOT EXISTS snort_alerts (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            attack_type VARCHAR(255) NOT NULL,
-            source_ip VARCHAR(45) NOT NULL,
-            destination_ip VARCHAR(45),
-            rule_priority VARCHAR(50) NOT NULL,
-            summary TEXT NOT NULL,
-            alert_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_alert_time (alert_time),
-            INDEX idx_priority (rule_priority),
-            INDEX idx_source_ip (source_ip)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        query = """
+        INSERT INTO snort_alerts 
+        (attack_type, source_ip, destination_ip, rule_priority, summary, alert_time, detection_mode)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
-        
-        cursor.execute(create_table_query)
-        connection.commit()
-        logger.info("snort_alerts table created successfully")
-        
-    except Error as e:
-        logger.error(f"Error creating table: {e}")
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
-
-# Routes
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {
-        "message": "Snort Alert Integration API",
-        "status": "online",
-        "version": "1.0.0"
-    }
-
-@app.get("/health")
-async def health():
-    """Health check with database connection test"""
-    try:
-        connection = get_db_connection()
-        if connection.is_connected():
-            cursor = connection.cursor()
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-            cursor.close()
-            connection.close()
-            return {
-                "status": "healthy",
-                "database": "connected"
-            }
+        values = (
+            alert_data.get('attack_type'),
+            alert_data.get('source_ip'),
+            alert_data.get('destination_ip'),
+            alert_data.get('rule_priority', 3),
+            alert_data.get('summary'),
+            datetime.now(),
+            alert_data.get('detection_mode', 'simulated')
+        )
+        cursor.execute(query, values)
+        conn.commit()
+        return True
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=500, detail="Database connection failed")
+        print(f"Error storing alert: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+# ==================== ENDPOINTS ====================
 
 @app.post("/api/snort-alert")
 async def receive_snort_alert(alert: SnortAlert):
     """
-    Receive a Snort alert and store it in the database
-    
-    Example payload:
-    {
-        "attack_type": "SQL Injection Attempt",
-        "source_ip": "192.168.1.100",
-        "destination_ip": "10.0.0.1",
-        "rule_priority": "High",
-        "summary": "Potential SQL injection detected in GET parameter"
-    }
+    Endpoint to receive simulated alerts
     """
-    try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-        
-        # Use provided alert_time or current time
-        alert_time = alert.alert_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        insert_query = """
-        INSERT INTO snort_alerts 
-        (attack_type, source_ip, destination_ip, rule_priority, summary, alert_time)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """
-        
-        values = (
-            alert.attack_type,
-            alert.source_ip,
-            alert.destination_ip,
-            alert.rule_priority,
-            alert.summary,
-            alert_time
-        )
-        
-        cursor.execute(insert_query, values)
-        connection.commit()
-        alert_id = cursor.lastrowid
-        
-        logger.info(f"Alert stored successfully with ID: {alert_id}")
+    alert_dict = alert.dict()
+    alert_dict['detection_mode'] = 'simulated'
+    
+    if store_alert(alert_dict):
+        return {
+            "status": "success",
+            "message": "Simulated alert received",
+            "detection_mode": "simulated"
+        }
+    return {"status": "error", "message": "Failed to store alert"}
+
+@app.post("/api/detect-injection")
+async def detect_injection(data: dict):
+    """
+    Endpoint for real SQL injection detection
+    Input: {"input": "data to test", "source_ip": "IP", "destination_ip": "IP"}
+    """
+    test_input = data.get('input', '')
+    source_ip = data.get('source_ip', '0.0.0.0')
+    destination_ip = data.get('destination_ip', '45.127.5.229')
+    
+    is_injection, pattern_desc = detect_sql_injection(test_input)
+    
+    if is_injection:
+        # Create alert for real detection
+        alert = {
+            'attack_type': 'SQL INJECTION',
+            'source_ip': source_ip,
+            'destination_ip': destination_ip,
+            'rule_priority': 8,
+            'summary': f'Detected: {pattern_desc} - Input: {test_input[:100]}',
+            'detection_mode': 'real'
+        }
+        store_alert(alert)
         
         return {
-            "success": True,
-            "message": "Alert stored successfully",
-            "alert_id": alert_id
+            "status": "attack_detected",
+            "attack_type": "SQL INJECTION",
+            "severity": "HIGH",
+            "pattern": pattern_desc,
+            "input": test_input[:100]
         }
-        
-    except Error as e:
-        logger.error(f"Error storing alert: {e}")
-        raise HTTPException(status_code=500, detail=f"Error storing alert: {str(e)}")
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
+    
+    return {
+        "status": "safe",
+        "message": "No SQL injection detected"
+    }
 
 @app.get("/api/alerts")
-async def get_alerts_simple():
+async def get_alerts(mode: Optional[str] = None, limit: int = 100):
     """
-    Get all recent Snort alerts - SIMPLE VERSION (NO PARAMETERS)
-    Returns last 20 alerts ordered by most recent first
+    Retrieve alerts from database
+    Optional filter by mode: 'simulated', 'real'
     """
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    cursor = conn.cursor(dictionary=True)
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
+        if mode and mode in ['simulated', 'real']:
+            query = "SELECT * FROM snort_alerts WHERE detection_mode = %s ORDER BY alert_time DESC LIMIT %s"
+            cursor.execute(query, (mode, limit))
+        else:
+            query = "SELECT * FROM snort_alerts ORDER BY alert_time DESC LIMIT %s"
+            cursor.execute(query, (limit,))
         
-        select_query = "SELECT id, attack_type, source_ip, destination_ip, rule_priority, summary, DATE_FORMAT(alert_time, '%Y-%m-%d %H:%i:%s') as alert_time FROM snort_alerts ORDER BY alert_time DESC LIMIT 20"
-        
-        cursor.execute(select_query)
         alerts = cursor.fetchall()
-        
         return {
-            "success": True,
+            "status": "success",
             "total": len(alerts),
             "alerts": alerts
         }
-        
-    except Error as e:
-        logger.error(f"Error retrieving alerts: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
+        cursor.close()
+        conn.close()
 
-@app.get("/api/get-snort-alerts")
-async def get_snort_alerts(limit: int = 5, offset: int = 0):
-    """
-    Get recent Snort alerts from the database
+@app.get("/api/stats")
+async def get_stats():
+    """Get alert statistics"""
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
     
-    Query Parameters:
-    - limit: Number of alerts to return (default: 5)
-    - offset: Number of alerts to skip (default: 0)
-    """
+    cursor = conn.cursor(dictionary=True)
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
+        # Stats by detection mode
+        cursor.execute("SELECT detection_mode, COUNT(*) as count FROM snort_alerts GROUP BY detection_mode")
+        mode_stats = cursor.fetchall()
         
-        # Limit the maximum number of alerts to prevent abuse
-        limit = min(limit, 100)
+        # Stats by attack type
+        cursor.execute("SELECT attack_type, COUNT(*) as count FROM snort_alerts GROUP BY attack_type ORDER BY count DESC")
+        type_stats = cursor.fetchall()
         
-        select_query = """
-        SELECT 
-            id,
-            attack_type,
-            source_ip,
-            destination_ip,
-            rule_priority,
-            summary,
-            DATE_FORMAT(alert_time, '%Y-%m-%d %H:%i:%s') as alert_time
-        FROM snort_alerts
-        ORDER BY alert_time DESC
-        LIMIT {limit} OFFSET {offset}
-        """
-        
-        cursor.execute(select_query)
-        alerts = cursor.fetchall()
-        
-        # Get total count
-        cursor.execute("SELECT COUNT(*) as total FROM snort_alerts")
-        total = cursor.fetchone()['total']
+        # High priority alerts
+        cursor.execute("SELECT COUNT(*) as count FROM snort_alerts WHERE rule_priority >= 7")
+        high_priority = cursor.fetchone()
         
         return {
-            "success": True,
-            "total": total,
-            "alerts": alerts,
-            "limit": limit,
-            "offset": offset
+            "by_detection_mode": mode_stats,
+            "by_attack_type": type_stats,
+            "high_priority_alerts": high_priority['count'] if high_priority else 0
         }
-        
-    except Error as e:
-        logger.error(f"Error retrieving alerts: {e}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving alerts: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
+        cursor.close()
+        conn.close()
 
-@app.get("/api/get-snort-alerts-stats")
-async def get_snort_alerts_stats():
-    """Get statistics about stored alerts"""
-    try:
-        connection = get_db_connection()
-        cursor = connection.cursor(dictionary=True)
-        
-        # Get priority counts
-        cursor.execute("""
-        SELECT rule_priority, COUNT(*) as count
-        FROM snort_alerts
-        GROUP BY rule_priority
-        """)
-        priority_stats = cursor.fetchall()
-        
-        # Get total alerts
-        cursor.execute("SELECT COUNT(*) as total FROM snort_alerts")
-        total = cursor.fetchone()['total']
-        
-        # Get alerts in last hour
-        cursor.execute("""
-        SELECT COUNT(*) as count
-        FROM snort_alerts
-        WHERE alert_time >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
-        """)
-        last_hour = cursor.fetchone()['count']
-        
-        return {
-            "success": True,
-            "total_alerts": total,
-            "alerts_last_hour": last_hour,
-            "by_priority": priority_stats
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
+    conn = get_db_connection()
+    db_status = "connected" if conn else "disconnected"
+    if conn:
+        conn.close()
+    
+    return {
+        "status": "healthy",
+        "database": db_status,
+        "api_version": "2.0",
+        "features": ["simulated_alerts", "real_sql_injection_detection"]
+    }
+
+@app.get("/")
+async def root():
+    return {
+        "message": "LibraTrack API - Dual-Mode Detection",
+        "version": "2.0",
+        "endpoints": {
+            "simulated": "/api/snort-alert (POST)",
+            "real_detection": "/api/detect-injection (POST)",
+            "get_alerts": "/api/alerts (GET)",
+            "statistics": "/api/stats (GET)",
+            "health": "/api/health (GET)"
         }
-        
-    except Error as e:
-        logger.error(f"Error retrieving stats: {e}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving stats: {str(e)}")
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
-
-@app.delete("/api/snort-alerts/{alert_id}")
-async def delete_snort_alert(alert_id: int):
-    """Delete a specific Snort alert by ID"""
-    try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
-        
-        delete_query = "DELETE FROM snort_alerts WHERE id = %s"
-        cursor.execute(delete_query, (alert_id,))
-        connection.commit()
-        
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Alert not found")
-        
-        return {
-            "success": True,
-            "message": f"Alert {alert_id} deleted successfully"
-        }
-        
-    except Error as e:
-        logger.error(f"Error deleting alert: {e}")
-        raise HTTPException(status_code=500, detail=f"Error deleting alert: {str(e)}")
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
-
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    """Create tables on startup"""
-    logger.info("Starting up Snort Alert API...")
-    create_snort_alerts_table()
-    logger.info("Startup complete!")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    logger.info("Shutting down Snort Alert API...")
+    }
 
 if __name__ == "__main__":
     import uvicorn
