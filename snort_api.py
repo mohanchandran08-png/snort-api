@@ -20,11 +20,12 @@ app.add_middleware(
 
 # Database Configuration
 DB_CONFIG = {
-    "host": "45.127.5.229",
-    "user": "librarytrack_user",
-    "password": "StrongPassword123!",  # REPLACE WITH YOUR ACTUAL PASSWORD
-    "database": "librarytrack_db"
+    "host": "127.0.0.1",
+    "user": "Libr_lmangskie",
+    "password": "StrongPassword123!",
+    "database": "Libr_auth_system"
 }
+
 
 # Data Models
 class SnortAlert(BaseModel):
