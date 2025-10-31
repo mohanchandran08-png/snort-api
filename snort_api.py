@@ -187,6 +187,35 @@ async def receive_snort_alert(alert: SnortAlert):
             cursor.close()
             connection.close()
 
+@app.get("/api/alerts")
+async def get_alerts_simple():
+    """
+    Get all recent Snort alerts - SIMPLE VERSION (NO PARAMETERS)
+    Returns last 20 alerts ordered by most recent first
+    """
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+        
+        select_query = "SELECT id, attack_type, source_ip, destination_ip, rule_priority, summary, DATE_FORMAT(alert_time, '%Y-%m-%d %H:%i:%s') as alert_time FROM snort_alerts ORDER BY alert_time DESC LIMIT 20"
+        
+        cursor.execute(select_query)
+        alerts = cursor.fetchall()
+        
+        return {
+            "success": True,
+            "total": len(alerts),
+            "alerts": alerts
+        }
+        
+    except Error as e:
+        logger.error(f"Error retrieving alerts: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        if connection.is_connected():
+            cursor.close()
+            connection.close()
+
 @app.get("/api/get-snort-alerts")
 async def get_snort_alerts(limit: int = 5, offset: int = 0):
     """
